@@ -1,9 +1,13 @@
 import React, { useState, useCallback, useRef } from 'react';
 import PropTypes from 'prop-types';
 import styled from 'styled-components';
-import { connect } from 'get-starknet';
 import { useSelector } from 'react-redux';
+import { CallData, byteArray } from 'starknet';
+import { useAccount } from '@starknet-react/core';
 import useIframeContent from '../hooks/useIframeContentMintModal';
+
+const contractAddress =
+  '0x029c4a89d43d618d62d0b0aab56ac0f0f5124b692ee2c0428eee29d0e0e97ff2';
 
 const ModalOverlay = styled.div`
   position: fixed;
@@ -24,6 +28,7 @@ const ModalContent = styled.div`
   padding: 20px;
   border-radius: 8px;
   max-width: 800px;
+  height: 400px;
   width: 100%;
 `;
 
@@ -41,6 +46,7 @@ const StyledContent = styled.div`
   display: flex;
   flex-direction: row;
   gap: 24px;
+  height: 100%;
   padding: 24px;
 `;
 
@@ -48,6 +54,7 @@ const Column = styled.div`
   flex: 1;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 12px;
 `;
 
@@ -106,7 +113,7 @@ const NFTPreview = styled.div`
   width: 100%;
   height: 200px;
   border-radius: 8px;
-  margin-bottom: 24px;
+  margin-bottom: 2px;
   display: flex;
   justify-content: center;
   align-items: center;
@@ -114,6 +121,7 @@ const NFTPreview = styled.div`
   font-size: 1.5em;
   text-align: center;
   overflow: hidden;
+  height: 100%;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
 `;
 
@@ -124,8 +132,18 @@ const CongratsMessage = styled.div`
   color: #333;
 `;
 
+const CongratsIcon = styled.div`
+  font-size: 3em;
+  color: #333;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+`;
+
 const ButtonRow = styled.div`
   display: flex;
+  width: 100%;
   justify-content: space-between;
   margin-top: 12px;
 `;
@@ -140,6 +158,8 @@ const NFTMintModal = ({ isOpen, onClose }) => {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
+  const [transactionHash, setTransactionHash] = useState(null);
+  const { account } = useAccount();
   const [nftData, setNftData] = useState({
     name: '',
     description: '',
@@ -151,6 +171,42 @@ const NFTMintModal = ({ isOpen, onClose }) => {
   const svgContent = svgFile ? svgFile.content : '';
   const srcDoc = useIframeContent(svgContent);
   const iframeRef = useRef(null);
+
+  const captureAndConvertSVG = useCallback(() => {
+    if (iframeRef.current) {
+      const iframeDocument = iframeRef.current.contentDocument;
+      const svgElement = iframeDocument.querySelector('svg');
+
+      if (svgElement) {
+        // Clone the SVG to avoid modifying the original
+        const clonedSvg = svgElement.cloneNode(true);
+
+        // Remove any scripts
+        const scripts = clonedSvg.getElementsByTagName('script');
+        while (scripts[0]) {
+          scripts[0].parentNode.removeChild(scripts[0]);
+        }
+
+        // Set attributes
+        clonedSvg.setAttribute('width', '74px');
+        clonedSvg.setAttribute('height', '74px');
+        clonedSvg.setAttribute('viewBox', '0 0 400 400');
+        clonedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+        // Convert to string
+        const serializer = new XMLSerializer();
+        let svgString = serializer.serializeToString(clonedSvg);
+
+        // Ensure the SVG string starts with the XML declaration
+        if (!svgString.startsWith('<?xml')) {
+          svgString = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>${svgString}`;
+        }
+
+        return svgString;
+      }
+    }
+    return null;
+  }, []);
 
   const handleInputChange = useCallback((e) => {
     const { name, value } = e.target;
@@ -194,6 +250,72 @@ const NFTMintModal = ({ isOpen, onClose }) => {
     return valid;
   };
 
+  const buildMetadata = (name, description, svgData) => {
+    const processedSvgData = svgData.replace(/"/g, "'");
+    const innerJson = `{"name":"${name}","description":"${description}","image":"data:image/svg+xml,${processedSvgData}"}`;
+    return innerJson.replace(/"/g, '\\"');
+  };
+
+  function stringToByteArray(val) {
+    if (!val) {
+      return '';
+    }
+    return CallData.compile(byteArray.byteArrayFromString(val)).toString();
+  }
+
+  const mint = async () => {
+    if (!account) {
+      setErrors((prev) => ({
+        ...prev,
+        minting: 'Please connect your wallet first.'
+      }));
+      return;
+    }
+
+    setLoading(true);
+    setErrors({});
+    setTransactionHash(null);
+
+    try {
+      const svgString = captureAndConvertSVG();
+      if (!svgString) {
+        throw new Error('Failed to capture SVG content');
+      }
+
+      const metadata = buildMetadata(
+        nftData.name,
+        nftData.description,
+        svgString
+      );
+      const calldataString = stringToByteArray(metadata);
+      const calldata = calldataString.split(',');
+
+      console.log(metadata);
+      console.log(calldata);
+
+      const res = await account.execute(
+        {
+          contractAddress,
+          entrypoint: 'mint',
+          calldata
+        },
+        undefined,
+        { maxFee: 1000000000000000 }
+      );
+
+      setTransactionHash(res.transaction_hash);
+      setStep(3);
+    } catch (err) {
+      console.error(err);
+      setErrors((prev) => ({
+        ...prev,
+        minting: 'An error occurred while minting. Please try again.'
+      }));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleNext = useCallback(async () => {
     if (step === 1) {
       if (validateStep1()) {
@@ -201,22 +323,7 @@ const NFTMintModal = ({ isOpen, onClose }) => {
       }
     } else if (step === 2) {
       if (validateStep2()) {
-        setLoading(true);
-        try {
-          const starknet = await connect();
-          if (!starknet) {
-            throw new Error('Please install a Starknet wallet extension.');
-          }
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          setStep(3);
-        } catch (error) {
-          setErrors((prev) => ({
-            ...prev,
-            minting: error.message || 'Minting failed'
-          }));
-        } finally {
-          setLoading(false);
-        }
+        await mint();
       }
     } else {
       onClose();
@@ -312,15 +419,27 @@ const NFTMintModal = ({ isOpen, onClose }) => {
         <CongratsMessage>
           Congratulations! Your NFT has been minted.
         </CongratsMessage>
-        <ButtonRow>
-          <Button onClick={onClose}>Close</Button>
-        </ButtonRow>
+        <CongratsIcon>
+          <img
+            src="https://shorturl.at/bTyXQ"
+            alt="Congrats icon"
+            style={{
+              width: '200px',
+              height: '150px',
+              alignSelf: 'center',
+              margin: '0 auto'
+            }}
+          />
+        </CongratsIcon>
+        {transactionHash && <p>Transaction hash: {transactionHash}</p>}
       </Column>
     </StyledContent>
   );
 
   const renderContent = () => {
     switch (step) {
+      case 0:
+        return renderStep1();
       case 1:
         return renderStep1();
       case 2:
@@ -337,7 +456,7 @@ const NFTMintModal = ({ isOpen, onClose }) => {
   return (
     <ModalOverlay>
       <ModalContent>
-        <CloseButton onClick={onClose}>&times;</CloseButton>
+        <CloseButton onClick={onClose}>X</CloseButton>
         {renderContent()}
       </ModalContent>
     </ModalOverlay>
